@@ -1,0 +1,7 @@
+# Example Terraform variables for TaskBoard EKS Infrastructure
+# Copy this file to terraform.tfvars and customize for your environment.
+# DO NOT commit real AWS credentials or production secrets to version control.
+
+aws_region   = "ap-south-1"
+cluster_name = "taskboard-eks"
+environment  = "dev"
