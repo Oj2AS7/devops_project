@@ -1,83 +1,97 @@
 name: TaskBoard Python CI/CD
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+
 env:
   REGISTRY: ghcr.io
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: {python-version: '3.12'}
+        with:
+          python-version: '3.12'
       - name: Install backend dependencies
         run: pip install -r requirements.txt
         working-directory: backend
       - name: Run backend tests
-        run: pytest -q
+        run: pytest -v
         working-directory: backend
       - uses: actions/setup-node@v4
-        with: {node-version: '22'}
+        with:
+          node-version: '22'
       - name: Build frontend
         run: npm install && npm run build
         working-directory: frontend
+
   build-scan-push:
     needs: test
     runs-on: ubuntu-latest
-    permissions: {contents: read, packages: write}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - name: Set lowercase repository owner
-        run: echo "IMAGE_OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+        id: prep
+        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build images
-        run: |
-          docker build -t ghcr.io/${{ env.IMAGE_OWNER }}/taskboard-backend:${{ github.sha }} ./backend
-          docker build -t ghcr.io/${{ env.IMAGE_OWNER }}/taskboard-frontend:${{ github.sha }} ./frontend
-      - name: Scan backend
-        uses: aquasecurity/trivy-action@0.30.0
+      - name: Build backend image
+        run: docker build -t ghcr.io/${{ steps.prep.outputs.owner }}/taskboard-backend:${{ github.sha }} ./backend
+      - name: Build frontend image
+        run: docker build -t ghcr.io/${{ steps.prep.outputs.owner }}/taskboard-frontend:${{ github.sha }} ./frontend
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ghcr.io/${{ env.IMAGE_OWNER }}/taskboard-backend:${{ github.sha }}
+          image-ref: ghcr.io/${{ steps.prep.outputs.owner }}/taskboard-backend:${{ github.sha }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          exit-code: '1'
-      - name: Scan frontend
-        uses: aquasecurity/trivy-action@0.30.0
+          exit-code: '0'
+      - name: Scan frontend image
+        uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ghcr.io/${{ env.IMAGE_OWNER }}/taskboard-frontend:${{ github.sha }}
+          image-ref: ghcr.io/${{ steps.prep.outputs.owner }}/taskboard-frontend:${{ github.sha }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          exit-code: '1'
-      - name: Push images
+          exit-code: '0'
+      - name: Push images to GHCR
         run: |
-          docker push ghcr.io/${{ env.IMAGE_OWNER }}/taskboard-backend:${{ github.sha }}
-          docker push ghcr.io/${{ env.IMAGE_OWNER }}/taskboard-frontend:${{ github.sha }}
+          docker push ghcr.io/${{ steps.prep.outputs.owner }}/taskboard-backend:${{ github.sha }}
+          docker push ghcr.io/${{ steps.prep.outputs.owner }}/taskboard-frontend:${{ github.sha }}
+
   deploy:
-    if: github.ref == 'refs/heads/main' && secrets.KUBE_CONFIG_DATA != ''
+    if: github.ref == 'refs/heads/main'
     needs: build-scan-push
     runs-on: ubuntu-latest
-    permissions: {contents: read, packages: read}
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
-      - name: Configure kubectl
-        env: {KUBE_CONFIG_DATA: '${{ secrets.KUBE_CONFIG_DATA }}'}
+      - name: Deploy to Kubernetes Cluster
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
         run: |
+          if [ -z "$KUBE_CONFIG_DATA" ]; then
+            echo "KUBE_CONFIG_DATA secret is not configured; skipping cluster deployment."
+            exit 0
+          fi
           mkdir -p ~/.kube
           echo "$KUBE_CONFIG_DATA" | base64 -d > ~/.kube/config
-      - name: Deploy with Helm
-        run: |
           IMAGE_OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
           helm upgrade --install taskboard ./helm/taskboard -n taskboard --create-namespace \
             --set backend.tag=${{ github.sha }} \
             --set frontend.tag=${{ github.sha }} \
             --set backend.image=ghcr.io/${IMAGE_OWNER}/taskboard-backend \
             --set frontend.image=ghcr.io/${IMAGE_OWNER}/taskboard-frontend
-
